@@ -1,15 +1,15 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Windows.Forms;
+using Meister_Hämmerlein.WindowForms;
 
 namespace Meister_Hämmerlein
 {
-    class Program
+    internal class Program
     {
-        static void Main(string[] args)
+        [STAThread]
+        private static void Main()
         {
+            Application.Run(new MainWindow());
         }
     }
 }

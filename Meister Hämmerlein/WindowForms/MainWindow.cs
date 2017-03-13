@@ -1,17 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
 using Meister_Hämmerlein.Core;
-using Microsoft.Office.Interop.Excel;
+using NPOI.HSSF.UserModel;
+using NPOI.SS.UserModel;
 
 namespace Meister_Hämmerlein.WindowForms
 {
     public partial class MainWindow : Form
     {
-        private readonly ExcelBookManager manager = new ExcelBookManager();
-
         public MainWindow()
         {
             InitializeComponent();
@@ -23,46 +23,102 @@ namespace Meister_Hämmerlein.WindowForms
             //dataGrid.DataSource = new BindingList<DataEntity>();
         }
 
-        private static void OnDataError(object sender, DataGridViewDataErrorEventArgs dataGridViewDataErrorEventArgs)
+        private BindingList<DataEntity> GenerateDataTable(ISheet workSheet)
         {
-            MessageBox.Show(dataGridViewDataErrorEventArgs.ToString());
-        }
-
-        private BindingList<DataEntity> GenerateDataTable(Workbook workbook)
-        {
-            var worksheet = (Worksheet)workbook.Worksheets[1];
-            var range = worksheet.UsedRange;
-            var rows = range.Rows.Count;
+            var rows = workSheet.LastRowNum;
             var entites = new List<DataEntity>();
 
             progressBar.Show();
             progressBar.Maximum = rows;
 
-            for (var i = 9; i <= rows; i++)
+            for (var i = 98; i <= rows; i++)
             {
+                var row = workSheet.GetRow(i);
+                if(row == null) continue;
+
                 try
                 {
-                    Console.WriteLine(i);
                     var entity = new DataEntity
                     {
-                        Date = DateTime.Parse((string) range[i, 1].Value2),
-                        Document = (string) range[i, 2].Value2,
-                        Analytics = (string) range[i, 4].Value2,
-                        DebetRu = (decimal)(range[i, 7].Value2 as double? ?? 0),
-                        CreditRu = (decimal)(range[i, 10].Value2 as double? ?? 0),
+                        Date = DateTime.Parse(row.GetCell(0).StringCellValue),
+                        Document = row.GetCell(1).StringCellValue,
+                        Analytics = row.GetCell(3).StringCellValue,
                     };
+
+                    var debetCell = row.GetCell(6)?.CellType;
+                    var creditCell = row.GetCell(9)?.CellType;
+
+                    if (debetCell != null && debetCell.Value == CellType.Numeric)
+                        entity.DebetRu = (decimal) row.GetCell(6).NumericCellValue;
+                    if (creditCell != null && creditCell.Value == CellType.Numeric)
+                        entity.CreditRu = (decimal) row.GetCell(9).NumericCellValue;
 
                     entites.Add(entity);
                     progressBar.Value = i;
                 }
-                catch (Exception)
+                catch (FormatException)
                 {
-                    // ignored
+                    //ignored
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Format exception in {i} : {e}");
                 }
             }
 
             progressBar.Hide();
             return new BindingList<DataEntity>(entites);
+        }
+
+        private void CreateHeader(ISheet workSheet)
+        {
+            var row = workSheet.CreateRow(0);
+            row.CreateCell(0).SetCellValue("Период");
+            row.CreateCell(1).SetCellValue("Документ");
+            row.CreateCell(2).SetCellValue("Аналитика Дт");
+            row.CreateCell(3).SetCellValue("Дебет, рубли");
+            row.CreateCell(4).SetCellValue("Дебет, USD");
+            row.CreateCell(5).SetCellValue("Кредит, рубли");
+            row.CreateCell(6).SetCellValue("Кредит, USD");
+            row.CreateCell(7).SetCellValue("Тип");
+        }
+
+        private void FillData(ISheet workSheet, int startRow, IList<DataEntity> data)
+        {
+            progressBar.Value = 0;
+            progressBar.Maximum = data.Count;
+            progressBar.Show();
+
+            var newDataFormat = workSheet.Workbook.CreateDataFormat();
+            var style = workSheet.Workbook.CreateCellStyle();
+
+            style.DataFormat = newDataFormat.GetFormat("dd.MM.yyyy");
+
+            for (int i = 0; i < data.Count; i++)
+            {
+                var row = workSheet.CreateRow(startRow + i);
+
+                var cell = row.CreateCell(0);
+                cell.SetCellValue(data[i].Date);
+                cell.CellStyle = style;
+
+                row.CreateCell(1).SetCellValue(data[i].Document);
+                row.CreateCell(2).SetCellValue(data[i].Analytics);
+                row.CreateCell(3).SetCellValue((double) data[i].DebetRu);
+                row.CreateCell(4).SetCellValue((double) data[i].DebetUsd);
+                row.CreateCell(5).SetCellValue((double) data[i].CreditRu);
+                row.CreateCell(6).SetCellValue((double) data[i].CreditUsd);
+                row.CreateCell(7).SetCellValue(data[i].Type);
+
+                progressBar.Value = i;
+            }
+
+            progressBar.Hide();
+        }
+
+        private static void OnDataError(object sender, DataGridViewDataErrorEventArgs dataGridViewDataErrorEventArgs)
+        {
+            MessageBox.Show(dataGridViewDataErrorEventArgs.ToString());
         }
 
         #region Events
@@ -79,12 +135,15 @@ namespace Meister_Hämmerlein.WindowForms
             {
                 try
                 {
-                    var workbook = manager.OpenWorkbook(openFileDialog.FileName);
-                    Console.WriteLine($"Succesfully opened {openFileDialog.FileName}");
-                    dataGrid.RowHeadersVisible = false;
-                    (dataGrid.DataSource as IDisposable)?.Dispose();
-                    dataGrid.DataSource = GenerateDataTable(workbook);
-                    dataGrid.RowHeadersVisible = true;
+                    HSSFWorkbook workbook;
+                    using (var file = new FileStream(openFileDialog.FileName, FileMode.Open, FileAccess.Read))
+                    {
+                        workbook = new HSSFWorkbook(file);
+                    }
+
+                    var sheet = workbook.GetSheetAt(0);
+                    var list = GenerateDataTable(sheet);
+                    dataGrid.DataSource = list;
                 }
                 catch (Exception exception)
                 {
@@ -98,47 +157,22 @@ namespace Meister_Hämmerlein.WindowForms
             var res = saveFileDialog.ShowDialog();
             if (res == DialogResult.OK)
             {
-                var data = dataGrid.DataSource as BindingList<DataEntity>;
+                var data = dataGrid.DataSource as IList<DataEntity>;
                 if (data == null)
                 {
-                    Console.WriteLine("Ooops");
+                    Console.WriteLine("Data in table is strange..");
                     return;
                 }
 
-                var workbook = manager.CreateWorkbook();
-                var worksheet = (Worksheet) workbook.Worksheets[1];
+                var workbook = new HSSFWorkbook();
+                var sheet = workbook.CreateSheet();
+                CreateHeader(sheet);
+                FillData(sheet, 1, data);
 
-                worksheet.Cells[1, 1] = "Период";
-                worksheet.Cells[1, 2] = "Документ";
-                worksheet.Cells[1, 3] = "Аналитика Дт";
-                worksheet.Cells[1, 4] = "Дебет, рубли";
-                worksheet.Cells[1, 5] = "Дебет, USD";
-                worksheet.Cells[1, 6] = "Кредит, рубли";
-                worksheet.Cells[1, 7] = "Кредит, USD";
-                worksheet.Cells[1, 8] = "Тип";
-
-                progressBar.Show();
-                progressBar.Maximum = data.Count;
-
-                for (var i = 0; i < data.Count; i++)
+                using (var file = new FileStream(saveFileDialog.FileName, FileMode.Create, FileAccess.Write))
                 {
-                    worksheet.Cells[i+2, 1] = data[i].Date;
-                    worksheet.Cells[i+2, 2] = data[i].Document;
-                    worksheet.Cells[i+2, 3] = data[i].Analytics;
-                    worksheet.Cells[i+2, 4] = data[i].DebetRu;
-                    worksheet.Cells[i+2, 5] = data[i].DebetUsd;
-                    worksheet.Cells[i+2, 6] = data[i].CreditRu;
-                    worksheet.Cells[i+2, 7] = data[i].CreditUsd;
-                    worksheet.Cells[i+2, 8] = data[i].Type;
-
-                    progressBar.Value = i;
+                    workbook.Write(file);
                 }
-
-                
-                workbook.SaveAs(saveFileDialog.FileName);
-                workbook.Close();
-
-                progressBar.Hide();
             }
         }
 
